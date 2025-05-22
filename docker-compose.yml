@@ -1,0 +1,158 @@
+version: "3.8"
+
+services:
+  # --- ZOOKEEPER & KAFKA ---
+  zookeeper:
+    image: wurstmeister/zookeeper:latest
+    container_name: zookeeper
+    ports:
+      - "2181:2181"
+    restart: always
+
+  kafka:
+    image: wurstmeister/kafka:latest
+    container_name: kafka
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_ADVERTISED_LISTENERS: INSIDE://kafka:9093,OUTSIDE://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INSIDE:PLAINTEXT,OUTSIDE:PLAINTEXT
+      KAFKA_LISTENERS: INSIDE://0.0.0.0:9093,OUTSIDE://0.0.0.0:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: INSIDE
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_CREATE_TOPICS: "sensor-suhu-gudang:1:1,sensor-kelembaban-gudang:1:1"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - zookeeper
+    restart: always
+
+  # --- HADOOP CLUSTER ---
+  namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    container_name: namenode
+    restart: always
+    ports:
+      - "9870:9870"
+      - "9000:9000"
+    volumes:
+      - hadoop_namenode:/hadoop/dfs/name
+    environment:
+      - CLUSTER_NAME=test
+
+  datanode:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: datanode
+    restart: always
+    volumes:
+      - hadoop_datanode:/hadoop/dfs/data
+    environment:
+      SERVICE_PRECONDITION: "namenode:9870"
+    depends_on:
+      - namenode
+
+  resourcemanager:
+    image: bde2020/hadoop-resourcemanager:2.0.0-hadoop3.2.1-java8
+    container_name: resourcemanager
+    restart: always
+    ports:
+      - "8088:8088"
+    environment:
+      SERVICE_PRECONDITION: "namenode:9000 namenode:9870 datanode:9864"
+    depends_on:
+      - namenode
+      - datanode
+
+  nodemanager1:
+    image: bde2020/hadoop-nodemanager:2.0.0-hadoop3.2.1-java8
+    container_name: nodemanager1
+    restart: always
+    environment:
+      SERVICE_PRECONDITION: "namenode:9000 namenode:9870 datanode:9864 resourcemanager:8088"
+    depends_on:
+      - namenode
+      - datanode
+      - resourcemanager
+
+  historyserver:
+    image: bde2020/hadoop-historyserver:2.0.0-hadoop3.2.1-java8
+    container_name: historyserver
+    restart: always
+    ports:
+      - "19888:19888"
+    environment:
+      SERVICE_PRECONDITION: "namenode:9000 namenode:9870 datanode:9864 resourcemanager:8088"
+    volumes:
+      - hadoop_historyserver:/hadoop/yarn/timeline
+    depends_on:
+      - namenode
+      - datanode
+      - resourcemanager
+
+  # --- SPARK CLUSTER (Standalone Mode) ---
+  spark-master:
+    image: bde2020/spark-master:latest
+    container_name: spark-master
+    ports:
+      - "8081:8080"
+      - "7077:7077"
+    volumes:
+      - ./pyspark_consumer.py:/app/pyspark_consumer.py
+    depends_on:
+      - kafka
+      - namenode
+      - resourcemanager
+    restart: always
+
+  spark-worker-1:
+    image: bde2020/spark-worker:latest
+    container_name: spark-worker-1
+    environment:
+      - "SPARK_MASTER=spark://spark-master:7077"
+      - "SPARK_WORKER_MEMORY=1g"
+      - "SPARK_WORKER_CORES=1"
+    volumes:
+      - ./pyspark_consumer.py:/app/pyspark_consumer.py
+    depends_on:
+      - spark-master
+    restart: always
+
+  # --- KAFKA PRODUCERS ---
+  producer-suhu:
+    image: python:3.9-slim
+    container_name: producer-suhu
+    working_dir: /app
+    volumes: # <--- INDENTASI DIPERBAIKI
+      # Pastikan file di host Anda bernama producer_suhu.py (dengan underscore)
+      - ./producer_suhu.py:/app/producer_suhu.py
+      - ./requirements_producers.txt:/app/requirements.txt
+    command: >
+      sh -c "pip install --no-cache-dir -r requirements.txt &&
+             python /app/producer_suhu.py"
+    depends_on:
+      - kafka
+    restart: on-failure
+
+  producer-kelembaban:
+    image: python:3.9-slim
+    container_name: producer-kelembaban
+    working_dir: /app
+    volumes:
+      - ./producer_kelembaban.py:/app/producer_kelembaban.py
+      - ./requirements_producers.txt:/app/requirements.txt
+    command: >
+      sh -c "pip install --no-cache-dir -r requirements.txt &&
+             python /app/producer_kelembaban.py"
+    depends_on:
+      - kafka
+    restart: on-failure
+
+volumes:
+  hadoop_namenode:
+  hadoop_datanode:
+  hadoop_historyserver:
+
+networks:
+  default:
+    name: bigdata_network
